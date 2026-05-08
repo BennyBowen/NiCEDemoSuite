@@ -1,0 +1,1166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NICE Demo Launcher</title>
+
+  <!--
+  ═══════════════════════════════════════════════════════════════════════
+  ARCHITECTURE OVERVIEW
+  ═══════════════════════════════════════════════════════════════════════
+  Single-file SPA (no build step required — ideal for conference demos).
+
+  Navigation model: JS state machine with three views:
+    home     → Landing page: 6 industry vertical cards
+    vertical → Vertical page: 3 demo-type cards (Synthesia / Storylane / Animation)
+    demo     → Playback page: iframe/video embed placeholder
+
+  State transitions:
+    home ──► vertical ──► demo
+      ◄──────────────────────
+      (back buttons + Escape key at every level)
+
+  NICE brand tokens are defined as CSS custom properties in :root
+  and mirrored into the Tailwind theme extension so both Tailwind
+  utility classes (e.g. bg-nice-navy) and plain CSS vars work together.
+
+  INTEGRATION POINTS are marked with "INTEGRATION POINT" comments.
+  Swap placeholder URLs in the VERTICALS data object (bottom of file)
+  and uncomment the iframe/video injection block in populateDemoPage().
+
+  SUGGESTED FOLDER STRUCTURE (if splitting into multiple files later):
+    /
+    ├── index.html                   ← this file (single-file version)
+    ├── assets/
+    │   ├── nice-logo.svg            ← replace logo placeholder
+    │   ├── fonts/                   ← self-host Inter if offline
+    │   └── videos/
+    │       ├── financial_animation.mp4
+    │       ├── retail_animation.mp4
+    │       └── ...
+    └── (optional: split into pages/ if converting to multi-file)
+  ═══════════════════════════════════════════════════════════════════════
+  -->
+
+  <!-- ── Tailwind CSS Play CDN ─────────────────────────────────────────
+       tailwind.config is set BEFORE the CDN script tag so the CDN
+       picks up the custom NICE theme extension on first load.
+       In production, replace with a compiled Tailwind build for speed.
+  ───────────────────────────────────────────────────────────────────── -->
+  <script>
+    window.tailwindConfig = {
+      theme: {
+        extend: {
+          colors: {
+            nice: {
+              navy:          '#00224F',
+              blue:          '#0050A0',
+              cyan:          '#00B4E1',
+              'cyan-light':  '#E5F7FD',
+              'blue-light':  '#E8F0FA',
+              slate:         '#4A5568',
+              'gray-light':  '#F5F7FA',
+              'gray-mid':    '#E2E8F0',
+            }
+          },
+          fontFamily: {
+            sans: ['"Inter"', '"Segoe UI"', 'system-ui', 'sans-serif'],
+          },
+        }
+      }
+    };
+  </script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>tailwind.config = window.tailwindConfig;</script>
+
+  <!-- Inter typeface — self-host for offline conference use if needed -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
+
+  <style>
+    /* ══════════════════════════════════════════════════════════════
+       NICE BRAND TOKENS  (CSS custom properties)
+       These drive all colour decisions. Update here to retheme.
+       ══════════════════════════════════════════════════════════════ */
+    :root {
+      /* Core palette */
+      --nice-navy:        #00224F;   /* Primary dark – headers, key text  */
+      --nice-blue:        #0050A0;   /* Primary mid  – links, CTAs        */
+      --nice-cyan:        #00B4E1;   /* Accent       – highlights, badges */
+      --nice-cyan-light:  #E5F7FD;   /* Tint         – Synthesia badge bg */
+      --nice-blue-light:  #E8F0FA;   /* Tint         – Storylane badge bg */
+
+      /* Neutrals */
+      --nice-gray-light:  #F5F7FA;   /* Page background                   */
+      --nice-gray-mid:    #E2E8F0;   /* Borders, dividers                 */
+      --nice-white:       #FFFFFF;   /* Card surfaces                     */
+
+      /* Text */
+      --nice-text:        #1A2744;   /* Body text (navy-tinted black)     */
+      --nice-text-muted:  #64748B;   /* Secondary / descriptive text      */
+
+      /* Elevation / radii */
+      --nice-shadow-card: 0 4px 20px rgba(0, 34, 79, 0.10);
+      --nice-shadow-hover: 0 12px 36px rgba(0, 34, 79, 0.18);
+      --nice-radius:      0.75rem;
+      --nice-radius-lg:   1.25rem;
+    }
+
+    /* ── Base ───────────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; }
+
+    body {
+      font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
+      background-color: var(--nice-gray-light);
+      color: var(--nice-text);
+      -webkit-font-smoothing: antialiased;
+      margin: 0;
+    }
+
+    /* ── Page visibility ────────────────────────────────────────── */
+    .page          { display: none; }
+    .page.active   { display: flex; flex-direction: column; min-height: 100vh; }
+
+    /* ── Header gradient band ───────────────────────────────────── */
+    .nice-header {
+      background: linear-gradient(135deg, var(--nice-navy) 0%, #003580 55%, var(--nice-blue) 100%);
+    }
+
+    /* ── Card hover lift ────────────────────────────────────────── */
+    .nice-card {
+      transition: transform 0.2s ease, box-shadow 0.2s ease;
+    }
+    .nice-card:hover {
+      transform: translateY(-4px);
+      box-shadow: var(--nice-shadow-hover);
+    }
+
+    /* ── Demo-type card accent top stripe ───────────────────────── */
+    .demo-card-synthesia { border-top: 4px solid var(--nice-cyan); }
+    .demo-card-storylane { border-top: 4px solid var(--nice-blue); }
+    .demo-card-animation { border-top: 4px solid #7C3AED; }
+
+    /* ── Vertical icon tinted circle ────────────────────────────── */
+    .icon-bg {
+      background: rgba(0, 180, 225, 0.12);
+      border-radius: var(--nice-radius);
+    }
+
+    /* ── 16:9 responsive embed wrapper ─────────────────────────── */
+    .demo-embed-wrapper {
+      position: relative;
+      width: 100%;
+      padding-top: 56.25%;   /* 16 : 9 */
+    }
+    .demo-embed-wrapper iframe,
+    .demo-embed-wrapper video,
+    .demo-embed-placeholder {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      border: none;
+      border-radius: var(--nice-radius-lg);
+    }
+    .demo-embed-placeholder {
+      background: linear-gradient(135deg, #0a1628 0%, var(--nice-navy) 100%);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    /* ── Animated pulse indicator (header "LIVE DEMO" dot) ──────── */
+    @keyframes pulse-dot {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.4; }
+    }
+    .live-dot { animation: pulse-dot 2s ease-in-out infinite; }
+  </style>
+</head>
+
+<body>
+
+<!-- ════════════════════════════════════════════════════════════════════
+     SHARED HEADER TEMPLATE
+     Cloned into each page's [data-header] slot by injectHeader() in JS.
+
+     Tailwind UI reference: Application UI › Navigation › Navbars
+     Customised: NICE gradient, logo slot, breadcrumb, conference badge.
+     ════════════════════════════════════════════════════════════════════ -->
+<template id="tpl-header">
+  <header class="nice-header text-white shadow-lg">
+    <div class="max-w-screen-2xl mx-auto px-6 py-4 flex items-center justify-between gap-6">
+
+      <!-- Logo + wordmark  ─────────────────────────────────────── -->
+      <!-- INTEGRATION POINT: replace the inner <span> with:
+           <img src="assets/nice-logo.svg" alt="NICE" class="h-7 w-auto" />
+      -->
+      <button
+        onclick="navigate('home')"
+        class="flex items-center gap-3 group focus:outline-none"
+        aria-label="NICE Demo Launcher – go home"
+      >
+        <div class="w-10 h-10 bg-white rounded-lg flex items-center justify-center shadow flex-shrink-0">
+          <span class="font-extrabold text-[color:var(--nice-navy)] text-sm tracking-tight select-none">NICE</span>
+        </div>
+        <div class="text-left">
+          <div class="font-extrabold text-base leading-tight tracking-wide group-hover:text-[color:var(--nice-cyan)] transition-colors">NICE</div>
+          <div class="text-[10px] text-blue-200 tracking-[0.15em] uppercase font-medium">Demo Launcher</div>
+        </div>
+      </button>
+
+      <!-- Breadcrumb nav  (populated by updateBreadcrumb()) ───── -->
+      <!--
+           Tailwind UI reference: Application UI › Navigation › Breadcrumbs
+           Kept minimal – label truncation prevents overflow on 1080p.
+      -->
+      <nav
+        id="header-breadcrumb"
+        aria-label="Breadcrumb"
+        class="hidden md:flex items-center gap-1.5 text-sm text-blue-200 flex-1 min-w-0"
+      >
+        <!-- Dynamically populated by JS -->
+      </nav>
+
+      <!-- Conference "LIVE DEMO" indicator ───────────────────────── -->
+      <div class="hidden lg:flex items-center gap-2 text-xs font-semibold tracking-widest uppercase text-blue-200 bg-white/10 rounded-full px-4 py-1.5 flex-shrink-0">
+        <span class="live-dot w-2 h-2 rounded-full bg-[color:var(--nice-cyan)] inline-block"></span>
+        Live Demo
+      </div>
+
+    </div>
+  </header>
+</template>
+
+
+<!-- ════════════════════════════════════════════════════════════════════
+     PAGE 1 — LANDING PAGE  (home)
+     Six industry vertical cards in a 3-column grid.
+
+     Tailwind UI reference: Application UI › Data Display › Description Lists
+     Adapted as a 3×2 action-card grid optimised for large-screen scanning.
+     ════════════════════════════════════════════════════════════════════ -->
+<div id="page-home" class="page active">
+
+  <div data-header></div><!-- shared header slot -->
+
+  <main class="flex-1 max-w-screen-2xl mx-auto w-full px-6 py-12 lg:py-16">
+
+    <!-- Hero headline -->
+    <div class="mb-12 text-center">
+      <h1 class="text-4xl lg:text-5xl font-extrabold text-[color:var(--nice-navy)] mb-3 tracking-tight leading-tight">
+        Select Your Industry
+      </h1>
+      <p class="text-[color:var(--nice-text-muted)] text-lg lg:text-xl max-w-2xl mx-auto">
+        Choose a vertical to explore tailored NICE&nbsp;CXone demonstrations
+      </p>
+    </div>
+
+    <!-- ── Vertical cards grid ────────────────────────────────────────
+         Layout: 1 col (mobile) → 2 col (sm) → 3 col (lg+)
+         Each card has a full-width image zone across the top third,
+         followed by the icon + content area below.
+
+         IMAGE INTEGRATION — to add a real photo to any card:
+           Replace the inner <div class="card-img-placeholder"> with:
+           <img src="path/to/your-image.jpg"
+                alt="Descriptive alt text"
+                class="w-full h-full object-cover" />
+           The parent <div class="card-img-zone"> controls the height
+           and clips the image — no other changes needed.
+    ────────────────────────────────────────────────────────────────── -->
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6 lg:gap-8">
+
+      <!-- ── Financial Services & Insurance ── -->
+      <button
+        onclick="navigate('vertical','financial-services')"
+        class="nice-card bg-white rounded-2xl text-left shadow-[0_4px_20px_rgba(0,34,79,0.10)] border border-[color:var(--nice-gray-mid)] group focus:outline-none focus:ring-4 focus:ring-[color:var(--nice-cyan)]/40 overflow-hidden"
+        aria-label="Financial Services & Insurance demos"
+      >
+        <!-- Image zone: full-width, ~1/3 of card height ─────────── -->
+        <div class="card-img-zone w-full h-36 overflow-hidden relative">
+          <img src="https://raw.githubusercontent.com/BennyBowen/LogoRepository/main/Worcester_Bosch_Logo_SilverBG.png"
+                alt="Descriptive alt text"
+                class="w-full h-full object-cover" />          
+          <div class="card-img-placeholder w-full h-full flex flex-col items-center justify-center gap-2 bg-gradient-to-br from-slate-100 to-slate-200 border-b border-dashed border-slate-300">
+            <svg class="w-6 h-6 text-slate-400" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" aria-hidden="true">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.409a2.25 2.25 0 013.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 001.5-1.5V6a1.5 1.5 0 00-1.5-1.5H3.75A1.5 1.5 0 002.25 6v12a1.5 1.5 0 001.5 1.5zm10.5-11.25h.008v.008h-.008V8.25zm.375 0a.375.375 0 11-.75 0 .375.375 0 01.75 0z"/>
+            </svg>
+            <span class="text-[11px] font-medium text-slate-400 tracking-wide">Financial Services image</span>
+          </div>
+        </div>
+        <!-- Card content ─────────────────────────────────────────── -->
+        <div class="p-8">
+          <div class="icon-bg w-14 h-14 flex items-center justify-center mb-5">
+            <svg class="w-7 h-7 text-[color:var(--nice-blue)]" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24" aria-hidden="true">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M3 21h18M6 18V10M10 18V10M14 18V10M18 18V10M12 3L2 10h20L12 3z"/>
+            </svg>
+          </div>
+          <h2 class="text-xl font-bold text-[color:var(--nice-navy)] mb-2 group-hover:text-[color:var(--nice-blue)] transition-colors leading-snug">
+            Financial Services<br/>&amp; Insurance
+          </h2>
+          <p class="text-[color:var(--nice-text-muted)] text-sm leading-relaxed">
+            Fraud detection, claims resolution, and personalised banking customer experiences.
+          </p>
+          <div class="mt-5 flex items-center gap-1.5 text-[color:var(--nice-cyan)] font-semibold text-sm">
+            View demos
+            <svg class="w-4 h-4 group-hover:translate-x-1 transition-transform" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24" aria-hidden="true">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/>
+            </svg>
+          </div>
+        </div>
+      </button>
+
+      <!-- ── Retail ── -->
+      <button
+        onclick="navigate('vertical','retail')"
+        class="nice-card bg-white rounded-2xl text-left shadow-[0_4px_20px_rgba(0,34,79,0.10)] border border-[color:var(--nice-gray-mid)] group focus:outline-none focus:ring-4 focus:ring-[color:var(--nice-cyan)]/40 overflow-hidden"
+        aria-label="Retail demos"
+      >
+        <!-- Image zone: full-width, ~1/3 of card height ─────────── -->
+        <div class="card-img-zone w-full h-36 overflow-hidden relative">
+          <!-- REPLACE THIS DIV with <img src="…" class="w-full h-full object-cover" alt="Retail"> -->
+          <div class="card-img-placeholder w-full h-full flex flex-col items-center justify-center gap-2 bg-gradient-to-br from-slate-100 to-slate-200 border-b border-dashed border-slate-300">
+            <svg class="w-6 h-6 text-slate-400" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" aria-hidden="true">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.409a2.25 2.25 0 013.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 001.5-1.5V6a1.5 1.5 0 00-1.5-1.5H3.75A1.5 1.5 0 002.25 6v12a1.5 1.5 0 001.5 1.5zm10.5-11.25h.008v.008h-.008V8.25zm.375 0a.375.375 0 11-.75 0 .375.375 0 01.75 0z"/>
+            </svg>
+            <span class="text-[11px] font-medium text-slate-400 tracking-wide">Retail image</span>
+          </div>
+        </div>
+        <!-- Card content ─────────────────────────────────────────── -->
+        <div class="p-8">
+          <div class="icon-bg w-14 h-14 flex items-center justify-center mb-5">
+            <svg class="w-7 h-7 text-[color:var(--nice-blue)]" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24" aria-hidden="true">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M16 11V7a4 4 0 00-8 0v4M5 9h14l1 12H4L5 9z"/>
+            </svg>
+          </div>
+          <h2 class="text-xl font-bold text-[color:var(--nice-navy)] mb-2 group-hover:text-[color:var(--nice-blue)] transition-colors">
+            Retail
+          </h2>
+          <p class="text-[color:var(--nice-text-muted)] text-sm leading-relaxed">
+            Omnichannel customer service, returns management, and loyalty programme engagement.
+          </p>
+          <div class="mt-5 flex items-center gap-1.5 text-[color:var(--nice-cyan)] font-semibold text-sm">
+            View demos
+            <svg class="w-4 h-4 group-hover:translate-x-1 transition-transform" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24" aria-hidden="true">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/>
+            </svg>
+          </div>
+        </div>
+      </button>
+
+      <!-- ── Energy & Utilities ── -->
+      <button
+        onclick="navigate('vertical','energy-utilities')"
+        class="nice-card bg-white rounded-2xl text-left shadow-[0_4px_20px_rgba(0,34,79,0.10)] border border-[color:var(--nice-gray-mid)] group focus:outline-none focus:ring-4 focus:ring-[color:var(--nice-cyan)]/40 overflow-hidden"
+        aria-label="Energy & Utilities demos"
+      >
+        <!-- Image zone: full-width, ~1/3 of card height ─────────── -->
+        <div class="card-img-zone w-full h-36 overflow-hidden relative">
+          <!-- REPLACE THIS DIV with <img src="…" class="w-full h-full object-cover" alt="Energy & Utilities"> -->
+          <div class="card-img-placeholder w-full h-full flex flex-col items-center justify-center gap-2 bg-gradient-to-br from-slate-100 to-slate-200 border-b border-dashed border-slate-300">
+            <svg class="w-6 h-6 text-slate-400" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" aria-hidden="true">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.409a2.25 2.25 0 013.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 001.5-1.5V6a1.5 1.5 0 00-1.5-1.5H3.75A1.5 1.5 0 002.25 6v12a1.5 1.5 0 001.5 1.5zm10.5-11.25h.008v.008h-.008V8.25zm.375 0a.375.375 0 11-.75 0 .375.375 0 01.75 0z"/>
+            </svg>
+            <span class="text-[11px] font-medium text-slate-400 tracking-wide">Energy &amp; Utilities image</span>
+          </div>
+        </div>
+        <!-- Card content ─────────────────────────────────────────── -->
+        <div class="p-8">
+          <div class="icon-bg w-14 h-14 flex items-center justify-center mb-5">
+            <svg class="w-7 h-7 text-[color:var(--nice-blue)]" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24" aria-hidden="true">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z"/>
+            </svg>
+          </div>
+          <h2 class="text-xl font-bold text-[color:var(--nice-navy)] mb-2 group-hover:text-[color:var(--nice-blue)] transition-colors">
+            Energy &amp; Utilities
+          </h2>
+          <p class="text-[color:var(--nice-text-muted)] text-sm leading-relaxed">
+            Outage management, smart meter support, and proactive field service notifications.
+          </p>
+          <div class="mt-5 flex items-center gap-1.5 text-[color:var(--nice-cyan)] font-semibold text-sm">
+            View demos
+            <svg class="w-4 h-4 group-hover:translate-x-1 transition-transform" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24" aria-hidden="true">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/>
+            </svg>
+          </div>
+        </div>
+      </button>
+
+      <!-- ── Government ── -->
+      <button
+        onclick="navigate('vertical','government')"
+        class="nice-card bg-white rounded-2xl text-left shadow-[0_4px_20px_rgba(0,34,79,0.10)] border border-[color:var(--nice-gray-mid)] group focus:outline-none focus:ring-4 focus:ring-[color:var(--nice-cyan)]/40 overflow-hidden"
+        aria-label="Government demos"
+      >
+        <!-- Image zone: full-width, ~1/3 of card height ─────────── -->
+        <div class="card-img-zone w-full h-36 overflow-hidden relative">
+          <!-- REPLACE THIS DIV with <img src="…" class="w-full h-full object-cover" alt="Government"> -->
+          <div class="card-img-placeholder w-full h-full flex flex-col items-center justify-center gap-2 bg-gradient-to-br from-slate-100 to-slate-200 border-b border-dashed border-slate-300">
+            <svg class="w-6 h-6 text-slate-400" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" aria-hidden="true">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.409a2.25 2.25 0 013.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 001.5-1.5V6a1.5 1.5 0 00-1.5-1.5H3.75A1.5 1.5 0 002.25 6v12a1.5 1.5 0 001.5 1.5zm10.5-11.25h.008v.008h-.008V8.25zm.375 0a.375.375 0 11-.75 0 .375.375 0 01.75 0z"/>
+            </svg>
+            <span class="text-[11px] font-medium text-slate-400 tracking-wide">Government image</span>
+          </div>
+        </div>
+        <!-- Card content ─────────────────────────────────────────── -->
+        <div class="p-8">
+          <div class="icon-bg w-14 h-14 flex items-center justify-center mb-5">
+            <svg class="w-7 h-7 text-[color:var(--nice-blue)]" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24" aria-hidden="true">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M8 14v3m4-3v3m4-3v3M3 21h18M3 10h18M3 7l9-4 9 4M4 10h16v11H4V10z"/>
+            </svg>
+          </div>
+          <h2 class="text-xl font-bold text-[color:var(--nice-navy)] mb-2 group-hover:text-[color:var(--nice-blue)] transition-colors">
+            Government
+          </h2>
+          <p class="text-[color:var(--nice-text-muted)] text-sm leading-relaxed">
+            Citizen services modernisation, compliance automation, and contact centre efficiency.
+          </p>
+          <div class="mt-5 flex items-center gap-1.5 text-[color:var(--nice-cyan)] font-semibold text-sm">
+            View demos
+            <svg class="w-4 h-4 group-hover:translate-x-1 transition-transform" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24" aria-hidden="true">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/>
+            </svg>
+          </div>
+        </div>
+      </button>
+
+      <!-- ── Telco & IT ── -->
+      <button
+        onclick="navigate('vertical','telco-it')"
+        class="nice-card bg-white rounded-2xl text-left shadow-[0_4px_20px_rgba(0,34,79,0.10)] border border-[color:var(--nice-gray-mid)] group focus:outline-none focus:ring-4 focus:ring-[color:var(--nice-cyan)]/40 overflow-hidden"
+        aria-label="Telco & IT demos"
+      >
+        <!-- Image zone: full-width, ~1/3 of card height ─────────── -->
+        <div class="card-img-zone w-full h-36 overflow-hidden relative">
+          <!-- REPLACE THIS DIV with <img src="…" class="w-full h-full object-cover" alt="Telco & IT"> -->
+          <div class="card-img-placeholder w-full h-full flex flex-col items-center justify-center gap-2 bg-gradient-to-br from-slate-100 to-slate-200 border-b border-dashed border-slate-300">
+            <svg class="w-6 h-6 text-slate-400" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" aria-hidden="true">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.409a2.25 2.25 0 013.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 001.5-1.5V6a1.5 1.5 0 00-1.5-1.5H3.75A1.5 1.5 0 002.25 6v12a1.5 1.5 0 001.5 1.5zm10.5-11.25h.008v.008h-.008V8.25zm.375 0a.375.375 0 11-.75 0 .375.375 0 01.75 0z"/>
+            </svg>
+            <span class="text-[11px] font-medium text-slate-400 tracking-wide">Telco &amp; IT image</span>
+          </div>
+        </div>
+        <!-- Card content ─────────────────────────────────────────── -->
+        <div class="p-8">
+          <div class="icon-bg w-14 h-14 flex items-center justify-center mb-5">
+            <svg class="w-7 h-7 text-[color:var(--nice-blue)]" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24" aria-hidden="true">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M8.111 16.404a5.5 5.5 0 017.778 0M12 20h.01m-7.08-7.071c3.904-3.905 10.236-3.905 14.141 0M1.394 9.393c5.857-5.857 15.355-5.857 21.213 0"/>
+            </svg>
+          </div>
+          <h2 class="text-xl font-bold text-[color:var(--nice-navy)] mb-2 group-hover:text-[color:var(--nice-blue)] transition-colors">
+            Telco &amp; IT
+          </h2>
+          <p class="text-[color:var(--nice-text-muted)] text-sm leading-relaxed">
+            Network issue resolution, technical support automation, and subscriber retention.
+          </p>
+          <div class="mt-5 flex items-center gap-1.5 text-[color:var(--nice-cyan)] font-semibold text-sm">
+            View demos
+            <svg class="w-4 h-4 group-hover:translate-x-1 transition-transform" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24" aria-hidden="true">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/>
+            </svg>
+          </div>
+        </div>
+      </button>
+
+      <!-- ── Healthcare ── -->
+      <button
+        onclick="navigate('vertical','healthcare')"
+        class="nice-card bg-white rounded-2xl text-left shadow-[0_4px_20px_rgba(0,34,79,0.10)] border border-[color:var(--nice-gray-mid)] group focus:outline-none focus:ring-4 focus:ring-[color:var(--nice-cyan)]/40 overflow-hidden"
+        aria-label="Healthcare demos"
+      >
+        <!-- Image zone: full-width, ~1/3 of card height ─────────── -->
+        <div class="card-img-zone w-full h-36 overflow-hidden relative">
+          <!-- REPLACE THIS DIV with <img src="…" class="w-full h-full object-cover" alt="Healthcare"> -->
+          <div class="card-img-placeholder w-full h-full flex flex-col items-center justify-center gap-2 bg-gradient-to-br from-slate-100 to-slate-200 border-b border-dashed border-slate-300">
+            <svg class="w-6 h-6 text-slate-400" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" aria-hidden="true">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.409a2.25 2.25 0 013.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 001.5-1.5V6a1.5 1.5 0 00-1.5-1.5H3.75A1.5 1.5 0 002.25 6v12a1.5 1.5 0 001.5 1.5zm10.5-11.25h.008v.008h-.008V8.25zm.375 0a.375.375 0 11-.75 0 .375.375 0 01.75 0z"/>
+            </svg>
+            <span class="text-[11px] font-medium text-slate-400 tracking-wide">Healthcare image</span>
+          </div>
+        </div>
+        <!-- Card content ─────────────────────────────────────────── -->
+        <div class="p-8">
+          <div class="icon-bg w-14 h-14 flex items-center justify-center mb-5">
+            <svg class="w-7 h-7 text-[color:var(--nice-blue)]" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24" aria-hidden="true">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"/>
+            </svg>
+          </div>
+          <h2 class="text-xl font-bold text-[color:var(--nice-navy)] mb-2 group-hover:text-[color:var(--nice-blue)] transition-colors">
+            Healthcare
+          </h2>
+          <p class="text-[color:var(--nice-text-muted)] text-sm leading-relaxed">
+            Patient scheduling, care coordination, and compliant clinical communications.
+          </p>
+          <div class="mt-5 flex items-center gap-1.5 text-[color:var(--nice-cyan)] font-semibold text-sm">
+            View demos
+            <svg class="w-4 h-4 group-hover:translate-x-1 transition-transform" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24" aria-hidden="true">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/>
+            </svg>
+          </div>
+        </div>
+      </button>
+
+    </div><!-- /vertical cards grid -->
+
+  </main>
+
+  <footer class="mt-auto py-5 border-t border-[color:var(--nice-gray-mid)]">
+    <p class="text-center text-xs text-[color:var(--nice-text-muted)]">
+      &copy; 2025 NICE Systems Ltd. &nbsp;·&nbsp; For internal demonstration purposes only
+      &nbsp;·&nbsp; Press <kbd class="bg-white border border-gray-200 rounded px-1 py-0.5 font-mono text-[10px]">Esc</kbd> to go back
+    </p>
+  </footer>
+
+</div><!-- /page-home -->
+
+
+<!-- ════════════════════════════════════════════════════════════════════
+     PAGE 2 — VERTICAL PAGE  (dynamically populated by JS)
+     Three demo-type cards: Synthesia / Storylane / Animation.
+
+     Tailwind UI reference: Application UI › Layout › Cards (action cards)
+     Adapted: colour-coded top stripe per demo type, type label badge.
+     ════════════════════════════════════════════════════════════════════ -->
+<div id="page-vertical" class="page">
+
+  <div data-header></div><!-- shared header slot -->
+
+  <main class="flex-1 max-w-screen-2xl mx-auto w-full px-6 py-10 lg:py-12">
+
+    <!-- Back button + vertical title block ───────────────────────── -->
+    <!--
+         Tailwind UI reference: Application UI › Elements › Buttons (text button)
+    -->
+    <div class="mb-10">
+      <button
+        onclick="navigate('home')"
+        class="inline-flex items-center gap-2 text-sm font-semibold text-[color:var(--nice-blue)] hover:text-[color:var(--nice-navy)] mb-6 group transition-colors focus:outline-none focus:underline"
+      >
+        <svg class="w-4 h-4 group-hover:-translate-x-1 transition-transform" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24" aria-hidden="true">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7"/>
+        </svg>
+        All Industries
+      </button>
+
+      <div class="flex items-start gap-5">
+        <!-- Icon injected by JS -->
+        <div id="vertical-icon" class="icon-bg w-16 h-16 flex items-center justify-center flex-shrink-0 mt-1"></div>
+        <div>
+          <!-- Title & subtitle injected by JS -->
+          <h1 id="vertical-title"    class="text-3xl lg:text-4xl font-extrabold text-[color:var(--nice-navy)] tracking-tight leading-tight"></h1>
+          <p  id="vertical-subtitle" class="text-[color:var(--nice-text-muted)] text-base mt-2 max-w-2xl"></p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Divider -->
+    <div class="border-t border-[color:var(--nice-gray-mid)] mb-10"></div>
+
+    <!-- Section label -->
+    <div class="mb-8">
+      <h2 class="text-xl font-bold text-[color:var(--nice-navy)] mb-1">Select a Demo Format</h2>
+      <p class="text-sm text-[color:var(--nice-text-muted)]">Choose the format that best suits your presentation context</p>
+    </div>
+
+    <!-- ── Demo type cards (3 columns) ───────────────────────────────
+         Each card has a colour-coded top stripe and type label badge.
+         onclick handlers are wired by populateVerticalPage() in JS.
+    ────────────────────────────────────────────────────────────────── -->
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-6 lg:gap-8">
+
+      <!-- Synthesia  ─────────────────────────────────────────── -->
+      <button
+        id="btn-synthesia"
+        class="nice-card demo-card-synthesia bg-white rounded-2xl p-8 text-left shadow-[0_4px_20px_rgba(0,34,79,0.10)] border border-[color:var(--nice-gray-mid)] group focus:outline-none focus:ring-4 focus:ring-[color:var(--nice-cyan)]/40"
+      >
+        <div class="w-12 h-12 rounded-xl bg-[color:var(--nice-cyan-light)] flex items-center justify-center mb-5">
+          <svg class="w-6 h-6 text-[color:var(--nice-cyan)]" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M15 10l4.553-2.069A1 1 0 0121 8.87v6.26a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"/>
+          </svg>
+        </div>
+        <span class="inline-block text-xs font-bold uppercase tracking-widest text-[color:var(--nice-cyan)] mb-3">AI Presenter</span>
+        <h3 class="text-xl font-bold text-[color:var(--nice-navy)] mb-2 group-hover:text-[color:var(--nice-blue)] transition-colors">Synthesia Demo</h3>
+        <p class="text-[color:var(--nice-text-muted)] text-sm leading-relaxed">
+          AI-generated video with a virtual presenter delivering a structured product story. Ideal for executive briefings.
+        </p>
+        <div class="mt-6 flex items-center gap-1.5 text-[color:var(--nice-cyan)] font-semibold text-sm">
+          Launch
+          <svg class="w-4 h-4 group-hover:translate-x-1 transition-transform" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/>
+          </svg>
+        </div>
+      </button>
+
+      <!-- Storylane  ─────────────────────────────────────────── -->
+      <button
+        id="btn-storylane"
+        class="nice-card demo-card-storylane bg-white rounded-2xl p-8 text-left shadow-[0_4px_20px_rgba(0,34,79,0.10)] border border-[color:var(--nice-gray-mid)] group focus:outline-none focus:ring-4 focus:ring-[color:var(--nice-cyan)]/40"
+      >
+        <div class="w-12 h-12 rounded-xl bg-[color:var(--nice-blue-light)] flex items-center justify-center mb-5">
+          <svg class="w-6 h-6 text-[color:var(--nice-blue)]" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
+          </svg>
+        </div>
+        <span class="inline-block text-xs font-bold uppercase tracking-widest text-[color:var(--nice-blue)] mb-3">Interactive Tour</span>
+        <h3 class="text-xl font-bold text-[color:var(--nice-navy)] mb-2 group-hover:text-[color:var(--nice-blue)] transition-colors">Storylane Demo</h3>
+        <p class="text-[color:var(--nice-text-muted)] text-sm leading-relaxed">
+          Guided interactive product walkthrough letting your audience follow along step-by-step in real time.
+        </p>
+        <div class="mt-6 flex items-center gap-1.5 text-[color:var(--nice-blue)] font-semibold text-sm">
+          Launch
+          <svg class="w-4 h-4 group-hover:translate-x-1 transition-transform" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/>
+          </svg>
+        </div>
+      </button>
+
+      <!-- Animation loop  ─────────────────────────────────────── -->
+      <button
+        id="btn-animation"
+        class="nice-card demo-card-animation bg-white rounded-2xl p-8 text-left shadow-[0_4px_20px_rgba(0,34,79,0.10)] border border-[color:var(--nice-gray-mid)] group focus:outline-none focus:ring-4 focus:ring-[color:var(--nice-cyan)]/40"
+      >
+        <div class="w-12 h-12 rounded-xl bg-purple-50 flex items-center justify-center mb-5">
+          <svg class="w-6 h-6 text-purple-600" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+          </svg>
+        </div>
+        <span class="inline-block text-xs font-bold uppercase tracking-widest text-purple-600 mb-3">Motion Graphic</span>
+        <h3 class="text-xl font-bold text-[color:var(--nice-navy)] mb-2 group-hover:text-purple-700 transition-colors">Animation Loop</h3>
+        <p class="text-[color:var(--nice-text-muted)] text-sm leading-relaxed">
+          Looping animated overview — perfect for booth displays, kiosk mode, and background screen visuals.
+        </p>
+        <div class="mt-6 flex items-center gap-1.5 text-purple-600 font-semibold text-sm">
+          Launch
+          <svg class="w-4 h-4 group-hover:translate-x-1 transition-transform" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/>
+          </svg>
+        </div>
+      </button>
+
+    </div><!-- /demo type cards -->
+
+  </main>
+
+  <footer class="mt-auto py-5 border-t border-[color:var(--nice-gray-mid)]">
+    <p class="text-center text-xs text-[color:var(--nice-text-muted)]">
+      &copy; 2025 NICE Systems Ltd. &nbsp;·&nbsp; For internal demonstration purposes only
+      &nbsp;·&nbsp; Press <kbd class="bg-white border border-gray-200 rounded px-1 py-0.5 font-mono text-[10px]">Esc</kbd> to go back
+    </p>
+  </footer>
+
+</div><!-- /page-vertical -->
+
+
+<!-- ════════════════════════════════════════════════════════════════════
+     PAGE 3 — DEMO PLAYBACK PAGE  (dynamically populated by JS)
+     Minimal chrome: large 16:9 embed area, two back buttons, type badge.
+     ════════════════════════════════════════════════════════════════════ -->
+<div id="page-demo" class="page">
+
+  <div data-header></div><!-- shared header slot -->
+
+  <main class="flex-1 max-w-screen-2xl mx-auto w-full px-6 py-8">
+
+    <!-- Navigation row (Back to vertical + / Home) ─────────────── -->
+    <div class="flex items-center justify-between flex-wrap gap-3 mb-6">
+
+      <div class="flex items-center gap-3 text-sm">
+        <!-- Back to vertical -->
+        <button
+          id="demo-back-vertical"
+          class="inline-flex items-center gap-2 font-semibold text-[color:var(--nice-blue)] hover:text-[color:var(--nice-navy)] group transition-colors focus:outline-none focus:underline"
+        >
+          <svg class="w-4 h-4 group-hover:-translate-x-1 transition-transform" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7"/>
+          </svg>
+          <span id="demo-back-vertical-label">Back to Vertical</span>
+        </button>
+
+        <span class="text-[color:var(--nice-gray-mid)] select-none">/</span>
+
+        <!-- Back to home -->
+        <button
+          onclick="navigate('home')"
+          class="text-[color:var(--nice-text-muted)] hover:text-[color:var(--nice-navy)] transition-colors focus:outline-none focus:underline"
+        >
+          Home
+        </button>
+      </div>
+
+      <!-- Demo type badge (injected by JS) -->
+      <div id="demo-type-badge"></div>
+
+    </div>
+
+    <!-- Demo title & subtitle ───────────────────────────────────── -->
+    <div class="mb-6">
+      <h1 id="demo-title"    class="text-2xl lg:text-3xl font-extrabold text-[color:var(--nice-navy)] tracking-tight leading-tight"></h1>
+      <p  id="demo-subtitle" class="text-[color:var(--nice-text-muted)] text-sm mt-1.5"></p>
+    </div>
+
+    <!-- ══════════════════════════════════════════════════════════════
+         DEMO EMBED AREA  — 16:9 responsive wrapper
+         ══════════════════════════════════════════════════════════════
+         INTEGRATION POINT:
+         In populateDemoPage() (below), uncomment the iframe/video
+         injection block and replace PLACEHOLDER_ URLs in the VERTICALS
+         data object with real Synthesia / Storylane / video URLs.
+
+         Example replacements:
+           Synthesia  → <iframe src="https://share.synthesia.io/…" allowfullscreen …>
+           Storylane  → <iframe src="https://app.storylane.io/share/…" allow="fullscreen" …>
+           Animation  → <video src="assets/videos/retail_animation.mp4" autoplay loop muted …>
+    ══════════════════════════════════════════════════════════════════ -->
+    <div class="demo-embed-wrapper rounded-2xl overflow-hidden shadow-[0_8px_40px_rgba(0,34,79,0.18)]">
+      <div id="demo-embed" class="demo-embed-placeholder">
+        <!-- Placeholder content — replaced by real embed in production -->
+        <div class="text-center px-8">
+          <div class="mx-auto mb-4 w-20 h-20 rounded-full bg-white/10 flex items-center justify-center">
+            <svg class="w-10 h-10 text-white/60" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" aria-hidden="true">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M5.25 5.653c0-.856.917-1.398 1.667-.986l11.54 6.348a1.125 1.125 0 010 1.971l-11.54 6.347a1.125 1.125 0 01-1.667-.985V5.653z"/>
+            </svg>
+          </div>
+          <p id="demo-placeholder-label" class="font-semibold text-white/75 text-lg mb-2">Demo placeholder</p>
+          <p class="text-white/40 text-sm max-w-xs mx-auto leading-relaxed">
+            Replace this placeholder with your Synthesia, Storylane, or video embed URL in the VERTICALS data object
+          </p>
+        </div>
+      </div>
+    </div><!-- /embed wrapper -->
+
+    <!-- Presenter notes (shown only when notes exist) ──────────── -->
+    <div id="presenter-notes-block" class="hidden mt-6 bg-amber-50 border border-amber-200 rounded-xl p-5">
+      <div class="flex items-start gap-3">
+        <svg class="w-5 h-5 text-amber-500 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/>
+        </svg>
+        <div>
+          <p class="text-sm font-semibold text-amber-800 mb-1">Presenter Notes</p>
+          <p id="presenter-notes-text" class="text-sm text-amber-700 leading-relaxed"></p>
+        </div>
+      </div>
+    </div>
+
+  </main>
+
+  <footer class="mt-auto py-5 border-t border-[color:var(--nice-gray-mid)]">
+    <p class="text-center text-xs text-[color:var(--nice-text-muted)]">
+      &copy; 2025 NICE Systems Ltd. &nbsp;·&nbsp; For internal demonstration purposes only
+      &nbsp;·&nbsp; Press <kbd class="bg-white border border-gray-200 rounded px-1 py-0.5 font-mono text-[10px]">Esc</kbd> to return to vertical
+    </p>
+  </footer>
+
+</div><!-- /page-demo -->
+
+
+<!-- ════════════════════════════════════════════════════════════════════
+     JAVASCRIPT — Navigation state machine, data registry, UI helpers
+     ════════════════════════════════════════════════════════════════════ -->
+<script>
+
+/* ══════════════════════════════════════════════════════════════════════
+   1. DATA REGISTRY
+   ══════════════════════════════════════════════════════════════════════
+   Edit this object to:
+     • Rename or reorder verticals
+     • Swap demo URLs (replace PLACEHOLDER_* strings with real URLs)
+     • Update presenter notes
+
+   Each vertical entry shape:
+   {
+     label    : string  — display name used in title and breadcrumb
+     subtitle : string  — one-line context shown on the vertical page
+     iconSvg  : string  — inline SVG markup for the icon slot
+     demos    : {
+       synthesia : { title, url, notes }
+       storylane : { title, url, notes }
+       animation : { title, url, notes }
+     }
+   }
+══════════════════════════════════════════════════════════════════════ */
+const VERTICALS = {
+
+  'financial-services': {
+    label:    'Financial Services & Insurance',
+    subtitle: 'Fraud detection, claims resolution, and personalised banking customer experiences.',
+    iconSvg:  `<svg class="w-7 h-7" style="color:var(--nice-blue)" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M3 21h18M6 18V10M10 18V10M14 18V10M18 18V10M12 3L2 10h20L12 3z"/></svg>`,
+    demos: {
+      synthesia: {
+        title: 'Financial Services & Insurance — Synthesia Demo',
+        url:   'PLACEHOLDER_SYNTHESIA_FINANCIAL',
+        notes: 'Highlight AI-powered fraud detection and automated claims resolution. Duration approx. 3 minutes. Key talking points: 40% handle-time reduction, straight-through processing, real-time agent guidance.'
+      },
+      storylane: {
+        title: 'Financial Services & Insurance — Storylane Demo',
+        url:   'PLACEHOLDER_STORYLANE_FINANCIAL',
+        notes: 'Walk through the NICE CXone agent desktop for a retail banking dispute scenario. Allow 5–7 minutes for the full interactive path. You can skip to step 4 for a faster flow.'
+      },
+      animation: {
+        title: 'Financial Services & Insurance — Animation Loop',
+        url:   'PLACEHOLDER_ANIMATION_FINANCIAL',
+        notes: 'Loop-safe. Designed for booth kiosk display. No audio required — all messaging is on-screen.'
+      },
+    }
+  },
+
+  'retail': {
+    label:    'Retail',
+    subtitle: 'Omnichannel customer service, returns management, and loyalty programme engagement.',
+    iconSvg:  `<svg class="w-7 h-7" style="color:var(--nice-blue)" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M16 11V7a4 4 0 00-8 0v4M5 9h14l1 12H4L5 9z"/></svg>`,
+    demos: {
+      synthesia: {
+        title: 'Retail — Synthesia Demo',
+        url:   'PLACEHOLDER_SYNTHESIA_RETAIL',
+        notes: 'Focus on unified commerce and AI-driven personalisation. Approx. 3 minutes. Highlight the AI Copilot "next best action" capability.'
+      },
+      storylane: {
+        title: 'Retail — Storylane Demo',
+        url:   'PLACEHOLDER_STORYLANE_RETAIL',
+        notes: 'Interactive walkthrough of the returns journey and agent assist. Allow 5 minutes. Emphasise omnichannel continuity.'
+      },
+      animation: {
+        title: 'Retail — Animation Loop',
+        url:   'PLACEHOLDER_ANIMATION_RETAIL',
+        notes: 'Looping brand video. Best for open exhibition stands. No interaction needed.'
+      },
+    }
+  },
+
+  'energy-utilities': {
+    label:    'Energy & Utilities',
+    subtitle: 'Outage management, smart meter support, and proactive field service notifications.',
+    iconSvg:  `<svg class="w-7 h-7" style="color:var(--nice-blue)" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>`,
+    demos: {
+      synthesia: {
+        title: 'Energy & Utilities — Synthesia Demo',
+        url:   'PLACEHOLDER_SYNTHESIA_ENERGY',
+        notes: 'Covers proactive outage notifications and smart meter dispute resolution. 3 minutes. Lead with cost-to-serve reduction.'
+      },
+      storylane: {
+        title: 'Energy & Utilities — Storylane Demo',
+        url:   'PLACEHOLDER_STORYLANE_ENERGY',
+        notes: 'Interactive field engineer dispatch and IVR deflection scenario. Allow 6 minutes.'
+      },
+      animation: {
+        title: 'Energy & Utilities — Animation Loop',
+        url:   'PLACEHOLDER_ANIMATION_ENERGY',
+        notes: 'Looping motion graphic with sustainability messaging. Suitable for green-energy exhibition contexts.'
+      },
+    }
+  },
+
+  'government': {
+    label:    'Government',
+    subtitle: 'Citizen services modernisation, compliance automation, and contact centre efficiency.',
+    iconSvg:  `<svg class="w-7 h-7" style="color:var(--nice-blue)" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M8 14v3m4-3v3m4-3v3M3 21h18M3 10h18M3 7l9-4 9 4M4 10h16v11H4V10z"/></svg>`,
+    demos: {
+      synthesia: {
+        title: 'Government — Synthesia Demo',
+        url:   'PLACEHOLDER_SYNTHESIA_GOVERNMENT',
+        notes: 'Citizen-first digital transformation story. Approx. 3 minutes. Emphasise accessibility and compliance.'
+      },
+      storylane: {
+        title: 'Government — Storylane Demo',
+        url:   'PLACEHOLDER_STORYLANE_GOVERNMENT',
+        notes: 'Walkthrough of compliance recording and quality management for public sector. Allow 5–6 minutes.'
+      },
+      animation: {
+        title: 'Government — Animation Loop',
+        url:   'PLACEHOLDER_ANIMATION_GOVERNMENT',
+        notes: 'Informational loop suitable for government exhibition stands and waiting area screens.'
+      },
+    }
+  },
+
+  'telco-it': {
+    label:    'Telco & IT',
+    subtitle: 'Network issue resolution, technical support automation, and subscriber retention.',
+    iconSvg:  `<svg class="w-7 h-7" style="color:var(--nice-blue)" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M8.111 16.404a5.5 5.5 0 017.778 0M12 20h.01m-7.08-7.071c3.904-3.905 10.236-3.905 14.141 0M1.394 9.393c5.857-5.857 15.355-5.857 21.213 0"/></svg>`,
+    demos: {
+      synthesia: {
+        title: 'Telco & IT — Synthesia Demo',
+        url:   'PLACEHOLDER_SYNTHESIA_TELCO',
+        notes: 'Subscriber churn prevention and AI-assisted technical triage story. 3 minutes. Lead with CSAT uplift statistic.'
+      },
+      storylane: {
+        title: 'Telco & IT — Storylane Demo',
+        url:   'PLACEHOLDER_STORYLANE_TELCO',
+        notes: 'Interactive first-call resolution and AI copilot demonstration. Allow 5–7 minutes.'
+      },
+      animation: {
+        title: 'Telco & IT — Animation Loop',
+        url:   'PLACEHOLDER_ANIMATION_TELCO',
+        notes: 'Network-themed looping animation. Suited to technology conference kiosks.'
+      },
+    }
+  },
+
+  'healthcare': {
+    label:    'Healthcare',
+    subtitle: 'Patient scheduling, care coordination, and compliant clinical communications.',
+    iconSvg:  `<svg class="w-7 h-7" style="color:var(--nice-blue)" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"/></svg>`,
+    demos: {
+      synthesia: {
+        title: 'Healthcare — Synthesia Demo',
+        url:   'PLACEHOLDER_SYNTHESIA_HEALTHCARE',
+        notes: 'Patient scheduling and post-discharge follow-up automation. 3 minutes. Emphasise HIPAA compliance and empathy-led AI.'
+      },
+      storylane: {
+        title: 'Healthcare — Storylane Demo',
+        url:   'PLACEHOLDER_STORYLANE_HEALTHCARE',
+        notes: 'Interactive walkthrough of HIPAA-compliant contact centre workflows. Allow 6–8 minutes.'
+      },
+      animation: {
+        title: 'Healthcare — Animation Loop',
+        url:   'PLACEHOLDER_ANIMATION_HEALTHCARE',
+        notes: 'Healthcare brand loop. Suitable for waiting areas or conference exhibition stands.'
+      },
+    }
+  },
+
+};
+
+/* Demo type metadata — labels and badge colour classes */
+const DEMO_TYPES = {
+  synthesia: {
+    label:      'AI Presenter',
+    badgeClass: 'bg-[color:var(--nice-cyan-light)] text-[color:var(--nice-cyan)]',
+  },
+  storylane: {
+    label:      'Interactive Tour',
+    badgeClass: 'bg-[color:var(--nice-blue-light)] text-[color:var(--nice-blue)]',
+  },
+  animation: {
+    label:      'Motion Graphic',
+    badgeClass: 'bg-purple-50 text-purple-700',
+  },
+};
+
+
+/* ══════════════════════════════════════════════════════════════════════
+   2. NAVIGATION STATE MACHINE
+   ══════════════════════════════════════════════════════════════════════
+   navigate(view, verticalId?, demoType?)
+     view: 'home' | 'vertical' | 'demo'
+══════════════════════════════════════════════════════════════════════ */
+let currentVertical = null;
+
+function navigate(view, verticalId, demoType) {
+  // Hide all pages
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+
+  if (view === 'home') {
+    activatePage('page-home');
+    updateBreadcrumb([]);
+
+  } else if (view === 'vertical') {
+    currentVertical = verticalId;
+    populateVerticalPage(verticalId);
+    activatePage('page-vertical');
+    const v = VERTICALS[verticalId];
+    updateBreadcrumb([{ label: v.label }]);
+
+  } else if (view === 'demo') {
+    populateDemoPage(currentVertical, demoType);
+    activatePage('page-demo');
+    const v  = VERTICALS[currentVertical];
+    const dt = DEMO_TYPES[demoType];
+    updateBreadcrumb([
+      { label: v.label,  onClick: `navigate('vertical','${currentVertical}')` },
+      { label: dt.label },
+    ]);
+  }
+
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function activatePage(id) {
+  const page = document.getElementById(id);
+  page.classList.add('active');
+  injectHeader(page); // clone shared header into this page's slot
+}
+
+
+/* ══════════════════════════════════════════════════════════════════════
+   3. SHARED HEADER INJECTION
+   Clones <template id="tpl-header"> into each page's [data-header] slot.
+   Called every time a page is activated so the breadcrumb is always fresh.
+══════════════════════════════════════════════════════════════════════ */
+function injectHeader(page) {
+  const slot = page.querySelector('[data-header]');
+  if (!slot) return;
+  const tpl   = document.getElementById('tpl-header');
+  const clone = tpl.content.cloneNode(true);
+  slot.innerHTML = '';
+  slot.appendChild(clone);
+}
+
+
+/* ══════════════════════════════════════════════════════════════════════
+   4. BREADCRUMB  (Tailwind UI: Application UI › Navigation › Breadcrumbs)
+   items: Array<{ label: string, onClick?: string }>
+══════════════════════════════════════════════════════════════════════ */
+function updateBreadcrumb(items) {
+  // Run after next microtask so the freshly-cloned header is in the DOM
+  requestAnimationFrame(() => {
+    document.querySelectorAll('#header-breadcrumb').forEach(bc => {
+      bc.innerHTML = '';
+      if (items.length === 0) return;
+
+      // Home link
+      const home = document.createElement('button');
+      home.textContent = 'Home';
+      home.className = 'hover:text-white transition-colors truncate focus:outline-none focus:underline';
+      home.onclick = () => navigate('home');
+      bc.appendChild(home);
+
+      items.forEach(item => {
+        // Separator
+        const sep = document.createElement('span');
+        sep.textContent = '/';
+        sep.className = 'mx-1.5 opacity-30 select-none';
+        bc.appendChild(sep);
+
+        if (item.onClick) {
+          // Navigable crumb
+          const btn = document.createElement('button');
+          btn.textContent = item.label;
+          btn.className = 'hover:text-white transition-colors max-w-[180px] truncate focus:outline-none focus:underline';
+          btn.setAttribute('onclick', item.onClick);
+          bc.appendChild(btn);
+        } else {
+          // Current (non-navigable) crumb
+          const span = document.createElement('span');
+          span.textContent = item.label;
+          span.className = 'text-white font-semibold max-w-[180px] truncate';
+          bc.appendChild(span);
+        }
+      });
+    });
+  });
+}
+
+
+/* ══════════════════════════════════════════════════════════════════════
+   5. POPULATE VERTICAL PAGE
+   Fills #vertical-title, #vertical-subtitle, #vertical-icon,
+   and wires the three demo-type button onclick handlers.
+══════════════════════════════════════════════════════════════════════ */
+function populateVerticalPage(verticalId) {
+  const v = VERTICALS[verticalId];
+  document.getElementById('vertical-title').textContent    = v.label;
+  document.getElementById('vertical-subtitle').textContent = v.subtitle;
+  document.getElementById('vertical-icon').innerHTML       = v.iconSvg;
+
+  // Wire demo type buttons
+  ['synthesia', 'storylane', 'animation'].forEach(type => {
+    const btn = document.getElementById(`btn-${type}`);
+    if (btn) btn.onclick = () => navigate('demo', verticalId, type);
+  });
+}
+
+
+/* ══════════════════════════════════════════════════════════════════════
+   6. POPULATE DEMO PLAYBACK PAGE
+   Fills all dynamic slots and — when real URLs are provided — swaps
+   the placeholder with a live iframe or video element.
+══════════════════════════════════════════════════════════════════════ */
+function populateDemoPage(verticalId, demoType) {
+  const v    = VERTICALS[verticalId];
+  const demo = v.demos[demoType];
+  const dt   = DEMO_TYPES[demoType];
+
+  // Title & subtitle
+  document.getElementById('demo-title').textContent    = demo.title;
+  document.getElementById('demo-subtitle').textContent = v.subtitle;
+
+  // Type badge
+  const badge = document.getElementById('demo-type-badge');
+  badge.innerHTML = `
+    <span class="inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-widest px-3 py-1.5 rounded-full ${dt.badgeClass}">
+      ${dt.label}
+    </span>`;
+
+  // Back-to-vertical button
+  const backBtn = document.getElementById('demo-back-vertical');
+  if (backBtn) {
+    backBtn.onclick = () => navigate('vertical', verticalId);
+    document.getElementById('demo-back-vertical-label').textContent = `Back to ${v.label}`;
+  }
+
+  // Placeholder label
+  const placeholderLabel = document.getElementById('demo-placeholder-label');
+  if (placeholderLabel) placeholderLabel.textContent = demo.title;
+
+  /* ──────────────────────────────────────────────────────────────
+     INTEGRATION POINT — real embed injection
+     Uncomment the block below once you have replaced the
+     PLACEHOLDER_* strings in the VERTICALS data object above.
+     ──────────────────────────────────────────────────────────────
+  const embedArea = document.getElementById('demo-embed');
+  if (demoType === 'animation') {
+    // Local or hosted looping video
+    embedArea.innerHTML = `
+      <video
+        src="${demo.url}"
+        autoplay loop muted playsinline
+        class="absolute inset-0 w-full h-full object-cover"
+        style="border-radius:var(--nice-radius-lg)">
+      </video>`;
+  } else {
+    // Synthesia or Storylane iframe
+    embedArea.innerHTML = `
+      <iframe
+        src="${demo.url}"
+        allowfullscreen
+        allow="autoplay; fullscreen; picture-in-picture"
+        class="absolute inset-0 w-full h-full border-0"
+        style="border-radius:var(--nice-radius-lg)"
+        title="${demo.title}">
+      </iframe>`;
+  }
+  ────────────────────────────────────────────────────────────── */
+
+  // Presenter notes
+  const notesBlock = document.getElementById('presenter-notes-block');
+  const notesText  = document.getElementById('presenter-notes-text');
+  if (demo.notes) {
+    notesText.textContent = demo.notes;
+    notesBlock.classList.remove('hidden');
+  } else {
+    notesBlock.classList.add('hidden');
+  }
+}
+
+
+/* ══════════════════════════════════════════════════════════════════════
+   7. KEYBOARD NAVIGATION  (Escape = go back)
+   Presenter-friendly: one key to exit a demo without touching the mouse.
+══════════════════════════════════════════════════════════════════════ */
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+
+  const demoActive     = document.getElementById('page-demo').classList.contains('active');
+  const verticalActive = document.getElementById('page-vertical').classList.contains('active');
+
+  if (demoActive && currentVertical) {
+    navigate('vertical', currentVertical);
+  } else if (verticalActive) {
+    navigate('home');
+  }
+});
+
+
+/* ══════════════════════════════════════════════════════════════════════
+   8. INITIALISE
+   Inject the shared header into the initially-visible landing page.
+   (All other pages get their header injected in activatePage().)
+══════════════════════════════════════════════════════════════════════ */
+document.addEventListener('DOMContentLoaded', () => {
+  injectHeader(document.getElementById('page-home'));
+});
+
+</script>
+</body>
+</html>
